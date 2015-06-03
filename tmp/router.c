@@ -38,14 +38,11 @@
 
 using namespace std; 
 
-#define BUFSIZE 4096
+#define BUFSIZE 2048
 
 #define DV_FILE_OPEN_FAILED -1000
-#define UPDATE_INTERVAL 1 	
 
-struct timeval timeout;
-
-string formatBroadCast(); 
+pthread_mutex_t mutexRecv; 
 struct neighbors { 
 
 	char name;	
@@ -56,16 +53,21 @@ struct neighbors {
 }; 
 vector<struct neighbors> n; 
 
+typedef struct {
+	int sockfd; 
+	char nodeName; 
+	
+}recvArg; 
 
-struct Node { 
-	char node; 
-	int16_t nodePort;
-	char nextHop; 
-	int16_t nextHopPort; 
-	int16_t cost; 
-	bool active;  
+struct routingTable { 
+	char src; 
+	char dest; 
+	int  srcPort; 
+	int destPort; 	
+	int destCost; 
 }; 
-vector<struct Node> dv;  
+vector<struct routingTable> routeList;  
+
 
 int  getRoutesFromFile(vector<struct neighbors> &n, char &nodeName) {
 
@@ -134,6 +136,7 @@ int  getRoutesFromFile(vector<struct neighbors> &n, char &nodeName) {
 				//Cost to Neighbor 
 				char tmpChar = str[str.length() - 2];  
 				neighbor.cost = abs(tmpChar - '0'); 
+
 				
 				//save neighbor 
 				n.push_back(neighbor); 
@@ -187,7 +190,7 @@ int  getRoutesFromFile(vector<struct neighbors> &n, char &nodeName) {
 
 //Print Neighbors should be called after 
 //  getRoutesFromFile(vector<struct neighbors> &n, char &nodeName) 
-//This fucntion prints the node neighbors 
+//This fucntion prints the nodes neighbors 
 void printNeighbors(vector<struct neighbors> &n ) {
 
 	struct neighbors temp;  
@@ -232,133 +235,110 @@ int getNodePortNumber(char nodeName) {
 
 }
 
-void updateRoute(char *recvMessage, char nodeName) {
+void updateRoute(char recvMessage[], char nodeName) {
 
+
+	//Extract The message 
+	std::string msg(recvMessage); 
+	routingTable rt; 
+	std::string tmp; 
+	if (msg.substr(6,4) == "CNTL") {
+		//Extract Header 
+		tmp = msg.substr(11, 1);  
+		rt.src = tmp[0]; 
+		tmp = msg.substr(13,5); 
+		stringstream ss(tmp); 
+		ss >> rt.srcPort; 
+		ss.str(""); 
+		tmp = msg.substr(19,1);
+		rt.dest = tmp[0]; 
+		tmp = msg.substr(21,5);  
+		stringstream s(tmp);  
+		s >> rt.destPort;
+		s.str("");  
+		char tmpChar = msg[27]; 
+		rt.destCost = abs(tmpChar - '0');  
+
+		//Check if Route is not in route list, if not add it 
+		bool found = false; 
+		int k = 0; 	
+		for (int i = 0; i < routeList.size(); i++ ) {
+
+			if (rt.destPort == routeList.at(i).destPort) {
+				found = true; 
+				k = i; 
+				break; 
+			} 
+
+
+		}
+	//	if (found == false) {
+			//Not in routing table? Check for its source first
+//			if (rt.dest != nodeName) {
+				routeList.push_back(rt);  
+//			}
+	//	} 
+	}
+
+
+	for (int i = 0; i < routeList.size(); i++) {
+		
+		cout << routeList.at(i).dest <<":"<<routeList.at(i).destCost <<" " ; 	
+	} 	
+	cout <<endl; 
 
 }
+void *recvData(void *args) { 
+	
+	char recvMessage[BUFSIZE];  
+	
+	recvArg arg = *((recvArg *)args); 
+	int recvlen;		/* # bytes in acknowledgement message */
+	struct sockaddr_in remaddr;
+	socklen_t addrlen = sizeof(remaddr);  
+
+	//int sockfd = (int)socket; 
+	while(1) {  
 
 
-bool isActiveNeighbors(char nodeName, int nodePort, int neighborPort) {
+		recvlen = recvfrom(arg.sockfd, recvMessage, BUFSIZE, MSG_DONTWAIT, (struct sockaddr *)&remaddr, &addrlen);
 
-	int tmpfd = socket(AF_INET, SOCK_DGRAM, 0); 
-	struct sockaddr_in myaddr;
-	memset((char *)&myaddr, 0, sizeof(myaddr));
-	myaddr.sin_family = AF_INET;
-	myaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	myaddr.sin_port = htons(neighborPort);
-	int status;
-	if (status = bind(tmpfd, (struct sockaddr *)&myaddr, sizeof(myaddr)) >= 0) { 
-		close(tmpfd); 
-		int option = -1; 
-		setsockopt(tmpfd,SOL_SOCKET,(SO_REUSEPORT | SO_REUSEADDR),(char*)&option,sizeof(option)); 
-		return true; 
-	}
+		cout << "Received Result: " <<recvlen << " "<< string(recvMessage)<<endl; 
 
-	return false; 
-} 
+		if (recvlen > 0) {
+			recvMessage[recvlen] = 0;
+			if (recvMessage[0] == 'A' &&
+			recvMessage[1] == 'L' &&
+			recvMessage[2] == 'O' &&
+			recvMessage[3] == 'H' && 
+			recvMessage[4] == 'A') {
 
-void checkForActiveNodes(char nodeName, int nodePort) {
+				pthread_mutex_lock(&mutexRecv);  
+				updateRoute(recvMessage, arg.nodeName);
+				pthread_mutex_unlock(&mutexRecv);  
 
-	//Check for active neighbors 
-	//if neighbor is active add to nodeList
-	//Todo!! Remove from list if not active 
-	for (int i = 0; i <  n.size(); i++) {
-		Node n_nei; 
-		n_nei.node = nodeName; 
-		n_nei.nodePort = nodePort; 
-		n_nei.nextHop = n.at(i).name;
-		n_nei.nextHopPort = n.at(i).port; 
-		n_nei.cost = n.at(i).cost;
 
-		if(!isActiveNeighbors(nodeName,nodePort, n_nei.nextHopPort)) {
-
-			if (dv.empty()) { 
-				dv.push_back(n_nei);  
-
-			} else { 
-				bool found = false; 
-				for (int k = 0; k < dv.size(); k++) {
-					if (n_nei.nextHopPort == dv.at(k).nextHopPort) {
-
-						found = true; 
-						break; 
-					} 
-
-				} 
-				if (found == false) {
-					dv.push_back(n_nei);  
-
-				} 
-			
+				memset(recvMessage,0,strlen(recvMessage));  
 
 			} 
-		} 
-		
-
-	} 
 
 
-} 
-
-/*
-	Create BroadCast Message
-*/
-string formatBroadCast() { 
-
-	std::string str = ""; 
-	int numBytes = 0; 
-	stringstream ss; 
-	//pass route to char array and append delimer at the end 
-	for (int k = 0; k < dv.size(); k++) {
-
-		ss << dv.at(k).node << dv.at(k).nodePort; 
-		ss << dv.at(k).nextHop; 
-		ss << dv.at(k).nextHopPort << dv.at(k).cost; 	
-		
-
-	} 
-	ss >> str; 
-
-
-}  
-
-void broadCastDVToNeighbors(char nodeName, char serverPortNumber, char *server) {
-
-	struct sockaddr_in remaddr;  
-	char msg[BUFSIZE]; 
-	
-	for (int i = 0; i < n.size(); i++) {
-
-		if(!isActiveNeighbors(nodeName,serverPortNumber, n.at(i).port)) { 
-
-			/*string str = "ALOHA#CNTL#" + formatBroadCast(); 	
-			
-			for (int j = 0; j < str.length(); j++ ) {
-				msg[j] = str[j];  
-			} */
-
-					
-			memset((char *) &remaddr, 0, sizeof(remaddr));
-			remaddr.sin_family = AF_INET;
-			long port = n.at(i).port; 
-			remaddr.sin_port = htons(port);
-			if (inet_aton(server, &remaddr.sin_addr)==0) {
-				fprintf(stderr, "inet_aton() failed\n");
-				exit(1);
-			}
-
-			int sock = socket(AF_INET, SOCK_DGRAM, 0);  
-			int slen = sizeof(remaddr);  
-			int retV = sendto(sock,msg, strlen(msg), 0, (struct sockaddr *)&remaddr,slen);  
 		}
+
+
+		sleep(1); 
+	
 	}
+
 } 
+
 
 
 int main (int arc, char **argv) {
 
 	struct sockaddr_in myaddr;
 	int fd, i;
+	char buf[BUFSIZE];	/* message buffer */
 	char server[48] ;	/* change this to use a different server */
 
 	/* create a socket */
@@ -380,7 +360,7 @@ int main (int arc, char **argv) {
 	server[sizeof(server) - 1] = 0; 
 
 	/* bind it to all local addresses and pick any port number */
-	myaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	myaddr.sin_addr.s_addr = htonl(INADDR_ANY);
 	myaddr.sin_port = htons(serverPortNumber);
 
 	if (bind(fd, (struct sockaddr *)&myaddr, sizeof(myaddr)) < 0) {
@@ -388,63 +368,95 @@ int main (int arc, char **argv) {
 		return 0;
 	}       
 
+	struct sockaddr_in remaddr[n.size()]; 
+	struct sockaddr_in dummy; 
+	int slen=sizeof(dummy); 
 	
-	struct sockaddr_in dummy;
-	socklen_t addrlen = sizeof(dummy);  
+	routingTable rt; 
+	for (int i = 0; i < n.size(); i++ ) {
+		/* now define remaddr, the address to whom we want to send messages */
+		/* For convenience, the host address is expressed as a numeric IP address */
+		/* that we will convert to a binary format via inet_aton */
 
-
-
-	fd_set observedSockets; 
-	int fdmax; 
-	FD_ZERO(&observedSockets); 
-
-	timeout.tv_sec= UPDATE_INTERVAL; 
-	timeout.tv_usec=0;
-
-	char recvMessage[BUFSIZE];  
-
-	while (1) { 
-
-		FD_SET(fd, &observedSockets);
-		FD_SET(0,&observedSockets);
-
-		/* keep track of the biggest file descriptor */
-		fdmax = fd ; /* so far, it's this one*/
-
-		int activity=select(fdmax+1,&observedSockets,NULL,NULL,&timeout); // blocking all until there is some activity on any of the sockets
-
-		if(activity<0)
-		{
-			printf("error in select");
-			return 0;
-		}
-		else if(activity==0)
-		{
-			 broadCastDVToNeighbors(nodeName,serverPortNumber, server) ; 
-			//broadcast neighbor 
-			timeout.tv_sec= UPDATE_INTERVAL;
-			timeout.tv_usec=0;
-		
-		}
-		else  { 
-
-		       if(FD_ISSET(fd,&observedSockets)) // .. there has been activity on the mainSocket. thus there s a new connection that needs to be added
-			{
-               	
-				int byteReceived =  recv(fd, &recvMessage, BUFSIZE - 1, 0);  
-				//updateRoute(recvMessage, nodeName);  
-			 
-			} else {
-
-				cout << "Display " <<endl; 
+		memset((char *) &remaddr[i], 0, sizeof(remaddr[i]));
+		remaddr[i].sin_family = AF_INET;
+		long port = n.at(i).port; 
+		remaddr[i].sin_port = htons(port);
+		if (inet_aton(server, &remaddr[i].sin_addr)==0) {
+			fprintf(stderr, "inet_aton() failed\n");
+			exit(1);
 			}
 
-		} 
+		//Also initialize routing table with neighbors info
+		rt.dest =  n.at(i).name; 
+		rt.destPort = n.at(i).port; 
+		rt.destCost = n.at(i).cost; 
+		routeList.push_back(rt); 
+
 
 	} 
-	
+
+	//mutex
+	pthread_mutex_init(&mutexRecv, NULL);  
+
+	//Thread attr
+	pthread_attr_t attr; 
+	pthread_attr_init(&attr);  
+
+	//Receive Thread
+	pthread_t recvThread ; 
+	recvArg *rArgs = new recvArg; 
+	rArgs->sockfd = fd; 
+	rArgs->nodeName = nodeName; 
+	pthread_create(&recvThread, &attr, recvData,rArgs);  
 
 
+	char dest;
+	int destPort; 
+	int destCost;
+
+	char src = nodeName; 
+	int srcPort = serverPortNumber;
 	
+	std::string controlData;
+	std::stringstream ss; 
+	while (1) {
+		
+		for (int i = 0; i < n.size(); i++ ) {
+
+			for (int j = 0; j < routeList.size(); j++) {
+
+				dest = routeList.at(i).dest;
+				destPort = routeList.at(i).destPort;
+				destCost = routeList.at(i).destCost; 
+				ss << "ALOHA#" << "CNTL#" << src << "#" << srcPort << "#"; 
+				//copy data into buffer 
+				ss << dest << "#" <<destPort <<"#" << destCost <<".";  
+				ss >> controlData;
+		
+				for (int k = 0 ; k < controlData.length(); k++ ) {
+
+						buf[k] = controlData[k];  
+				} 
+
+				if (sendto(fd, buf, strlen(buf), 0, (struct sockaddr *)&remaddr[i], slen)==-1) {
+					perror("sendto");
+					exit(1);
+				}
+				ss.str(""); 
+				controlData = ""; 
+			
+			}
+		}
+
+		sleep(1); 
+
+			
+	} 
+	
+	pthread_mutex_destroy(&mutexRecv); 
+	pthread_cancel(recvThread); 
+	pthread_join(recvThread,NULL); 
+
 	return 0; 
 }
